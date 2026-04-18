@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime, timedelta, date as _date
 import subprocess
@@ -6,6 +7,8 @@ import os
 from pathlib import Path
 from openpyxl import load_workbook
 import io as _io
+import base64
+from html import escape
 
 # ═══════════════════════════════════════════════════════════
 # CONFIG
@@ -67,16 +70,143 @@ def build_titularisation(nom, prenom, poste, date_entree, date_fin,
     )
 
 
+def build_prolongement_table_row(nom, prenom, poste, direction, sup,
+                                 date_entree, date_fin_1ere, titre="Mme"):
+    """Construit les données du tableau pour le prolongement."""
+    return {
+        "Titre": titre,
+        "NOM": nom,
+        "PRENOM": prenom,
+        "FONCTION": poste,
+        "CHANTIER CTRL PRES": direction,
+        "SUP": sup,
+        "DATE D'EMBAUCHE": date_entree.strftime('%Y-%m-%d') if date_entree else "",
+        "DATE FIN 1ERE PERIODE D'ESSAI": date_fin_1ere.strftime('%d/%m/%Y') if date_fin_1ere else "",
+    }
+
+
+def format_text_table(table_row):
+    """Formate un tableau texte simple pour un copier-coller dans un mail."""
+    headers = list(table_row.keys())
+    values = [str(table_row[h] or "") for h in headers]
+    widths = [max(len(header), len(value)) for header, value in zip(headers, values)]
+
+    def _fmt_line(cells):
+        return "| " + " | ".join(cell.ljust(width) for cell, width in zip(cells, widths)) + " |"
+
+    separator = "+-" + "-+-".join("-" * width for width in widths) + "-+"
+    return "\n".join([
+        separator,
+        _fmt_line(headers),
+        separator,
+        _fmt_line(values),
+        separator,
+    ])
+
+
+def build_html_table(table_row):
+    """Construit un tableau HTML simple avec styles inline compatibles mail."""
+    header_cells = "".join(
+        f'<th style="border:1px solid #bfc7d5;padding:8px;text-align:left;background:#eef3f8;font-weight:600;">{escape(str(header))}</th>'
+        for header in table_row.keys()
+    )
+    value_cells = "".join(
+        f'<td style="border:1px solid #bfc7d5;padding:8px;text-align:left;">{escape(str(value or ""))}</td>'
+        for value in table_row.values()
+    )
+    return (
+        '<table style="border-collapse:collapse;width:100%;font-family:Calibri, Arial, sans-serif;font-size:14px;">'
+        f"<thead><tr>{header_cells}</tr></thead>"
+        f"<tbody><tr>{value_cells}</tr></tbody>"
+        "</table>"
+    )
+
+
+def build_prolongement_email_html(table_row, is_female=True):
+    """Construit une version HTML du mail de prolongement."""
+    collab = "collaboratrice" if is_female else "collaborateur"
+    table_html = build_html_table(table_row)
+    return (
+        '<div style="font-family:Calibri, Arial, sans-serif;font-size:14px;line-height:1.5;color:#1f2937;">'
+        '<p>Bonjour,</p>'
+        f"<p>Nous vous informons que la {collab} mentionné(e) ci-dessous arrive à la fin de leur première période d'essai.</p>"
+        '<p>Veuillez trouver ci-dessous les informations du collaborateur sous forme de tableau.</p>'
+        f"{table_html}"
+        "<p>Pouvez-vous nous confirmer si vous les considérez aptes à bénéficier d'une prolongation de leur période d'essai ?<br>"
+        "Nous vous prions de bien vouloir nous répondre par retour de mail.</p>"
+        '<p>Cordialement,</p>'
+        '</div>'
+    )
+
+
+def render_copy_html_button(html_content, key):
+    """Affiche un bouton qui copie le HTML du mail dans le presse-papiers."""
+    encoded_html = base64.b64encode(html_content.encode("utf-8")).decode("ascii")
+    components.html(
+        f"""
+        <div style="margin:0.25rem 0 0.75rem 0;">
+            <button id="copy-html-{key}" style="background:#0f766e;color:#fff;border:none;border-radius:0.5rem;padding:0.55rem 0.9rem;font-family:Arial,sans-serif;font-size:0.95rem;cursor:pointer;">
+                Copier le mail HTML
+            </button>
+            <div id="copy-html-status-{key}" style="margin-top:0.45rem;font-family:Arial,sans-serif;font-size:0.85rem;color:#475569;"></div>
+        </div>
+        <script>
+            const htmlContent = atob("{encoded_html}");
+            const button = document.getElementById("copy-html-{key}");
+            const status = document.getElementById("copy-html-status-{key}");
+
+            async function copyHtmlToClipboard() {{
+                try {{
+                    if (navigator.clipboard && window.ClipboardItem) {{
+                        const htmlBlob = new Blob([htmlContent], {{ type: "text/html" }});
+                        const textBlob = new Blob([htmlContent], {{ type: "text/plain" }});
+                        await navigator.clipboard.write([
+                            new ClipboardItem({{
+                                "text/html": htmlBlob,
+                                "text/plain": textBlob,
+                            }})
+                        ]);
+                    }} else if (navigator.clipboard) {{
+                        await navigator.clipboard.writeText(htmlContent);
+                    }} else {{
+                        throw new Error("Clipboard API indisponible");
+                    }}
+                    status.textContent = "Copie effectuée. Collez directement dans votre mail.";
+                    status.style.color = "#0f766e";
+                }} catch (error) {{
+                    status.textContent = "Copie impossible dans ce navigateur. Utilisez le téléchargement HTML.";
+                    status.style.color = "#b91c1c";
+                }}
+            }}
+
+            button.addEventListener("click", copyHtmlToClipboard);
+        </script>
+        """,
+        height=72,
+    )
+
+
 def build_prolongement(individu, nom, prenom, poste, direction, sup,
                         date_entree, date_fin_1ere, titre="Mme", is_female=True):
     """Génère le message de prolongement de période d'essai."""
     collab = "collaboratrice" if is_female else "collaborateur"
-    # Le tableau est affiché séparément dans l'UI; ici on garde uniquement le texte du message
+    table_row = build_prolongement_table_row(
+        nom=nom,
+        prenom=prenom,
+        poste=poste,
+        direction=direction,
+        sup=sup,
+        date_entree=date_entree,
+        date_fin_1ere=date_fin_1ere,
+        titre=titre,
+    )
+    table_text = format_text_table(table_row)
     return (
         "Bonjour , \n\n"
         f"Nous vous informons que la {collab} mentionné(e) ci-dessous "
         "arrive à la fin de leur première période d'essai.\n\n"
         "Veuillez trouver ci-dessous les informations du collaborateur sous forme de tableau.\n\n"
+        f"{table_text}\n\n"
         "Pouvez-vous nous confirmer si vous les considérez aptes à bénéficier "
         "d'une prolongation de leur période d'essai ?\n"
         "Nous vous prions de bien vouloir nous répondre par retour de mail.\n\n"
@@ -408,7 +538,7 @@ if uploaded:
 
                     # En mode prolongement, afficher les informations du collaborateur sous forme de tableau
                     if not is_titularisation:
-                        titre_tab, _ = get_gender_info(None)
+                        titre_tab, is_f_tab = get_gender_info(None)
                         poste_val = get_safe_str(row, gen_cols.get("poste"))
                         direction_val = get_safe_str(row, gen_cols.get("direction"))
                         sup_val = get_safe_str(row, gen_cols.get("sup"))
@@ -423,17 +553,32 @@ if uploaded:
                         else:
                             date_fin_1ere = None
 
-                        table_row = {
-                            "Titre": titre_tab,
-                            "NOM": n,
-                            "PRENOM": p,
-                            "FONCTION": poste_val,
-                            "CHANTIER CTRL PRES": direction_val,
-                            "SUP": sup_val,
-                            "DATE D'EMBAUCHE": date_entree_val.strftime('%Y-%m-%d') if date_entree_val else "",
-                            "DATE FIN  1ERE PERIODE D'ESSAI": date_fin_1ere.strftime('%d/%m/%Y') if date_fin_1ere else "",
-                        }
+                        table_row = build_prolongement_table_row(
+                            nom=n,
+                            prenom=p,
+                            poste=poste_val,
+                            direction=direction_val,
+                            sup=sup_val,
+                            date_entree=date_entree_val,
+                            date_fin_1ere=date_fin_1ere,
+                            titre=titre_tab,
+                        )
                         st.table(pd.DataFrame([table_row]))
+
+                        html_mail = build_prolongement_email_html(table_row, is_female=is_f_tab)
+                        safe_nom = "_".join(n.split()) if n else "NOM"
+                        safe_prenom = "_".join(p.split()) if p else "PRENOM"
+                        render_copy_html_button(html_mail, key=f"{i}_{safe_nom}_{safe_prenom}")
+                        st.download_button(
+                            "Télécharger le mail HTML",
+                            data=html_mail.encode("utf-8"),
+                            file_name=f"prolongement_{safe_nom}_{safe_prenom}.html",
+                            mime="text/html",
+                            key=f"download_html_{i}",
+                        )
+                        with st.expander("Aperçu HTML du mail", expanded=False):
+                            st.caption("Pour conserver la mise en forme du tableau, ouvrez le fichier HTML téléchargé puis copiez-collez depuis le navigateur vers le mail.")
+                            st.markdown(html_mail, unsafe_allow_html=True)
 
                     edited = st.text_area(
                         "✏️ Message (modifiable avant envoi)",
